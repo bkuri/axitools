@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+
+import argparse
+import fnmatch
+import json
+import os
+import shlex
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Sequence
+from typing import Dict, List, Optional, Union
+
+HOME = os.path.expanduser("~")
+CONF = os.path.join(HOME, ".config", "axr.toml")
+
+DEFAULT_CFG: dict[str, bool | str | int | list[str]] = {
+    "allow_local": False,
+    "identity_file": "",
+    "local_temp_dir": "/tmp/axr",
+    "proxy_command": "",
+    "remote_svg_base": "",
+    "require_ssh": False,
+    "skip_globs": ["**/.git/**", "**/.cache/**", "**/drafts/**"],
+    "ssh_host": "",
+    "ssh_port": 22,
+    "svg_roots": ["."],
+}
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"axr: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def load_toml(path: str) -> dict[str, bool | str | int | list[str]]:
+    cfg: dict[str, bool | str | int | list[str]] = dict(DEFAULT_CFG)
+    if os.path.exists(path):
+        import tomllib
+
+        with open(path, "rb") as f:
+            cfg.update(tomllib.load(f))
+    return cfg
+
+
+def is_local_host(host: str) -> bool:
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+
+    try:
+        return host in (socket.gethostname(), socket.getfqdn())
+
+    except Exception:
+        return False
+
+
+def base_ssh_args(cfg: dict[str, bool | str | int | list[str]]) -> list[str]:
+    a = ["ssh", "-p", str(cfg["ssh_port"])]
+
+    if cfg.get("identity_file"):
+        a += ["-i", os.path.expanduser(str(cfg["identity_file"]))]
+
+    if cfg.get("proxy_command"):
+        a += ["-o", f"ProxyCommand={cfg['proxy_command']}"]
+
+    return a + [str(cfg["ssh_host"])]
+
+
+def run_ssh(
+    cfg: dict[str, bool | str | int | list[str]],
+    remote_cmd: str,
+    capture: bool = True,
+    timeout: int = 30,
+) -> subprocess.CompletedProcess[str]:
+    cmd = base_ssh_args(cfg) + [remote_cmd]
+
+    return subprocess.run(
+        cmd,
+        stdout=(subprocess.PIPE if capture else None),
+        stderr=(subprocess.PIPE if capture else None),
+        text=True,
+        timeout=timeout,
+    )
+
+
+def ssh_json(
+    cfg: Dict[str, Union[bool, str, int, List[str]]], remote_cmd: str, timeout: int = 30
+) -> Dict[str, Union[str, int, bool]]:
+    r = run_ssh(cfg, remote_cmd, capture=True, timeout=timeout)
+
+    if r.returncode != 0:
+        die(r.stderr.strip() or "ssh error")
+
+    try:
+        return json.loads(r.stdout.strip())
+
+    except json.JSONDecodeError:
+        die("invalid JSON from remote")
+
+    # Unreachable, but satisfies type checking
+    raise RuntimeError("Unexpected code path")
+
+
+def ensure_remote_dir(
+    cfg: Dict[str, Union[bool, str, int, List[str]]], path: str
+) -> None:
+    if run_ssh(cfg, f"mkdir -p {shlex.quote(path)}").returncode != 0:
+        die("remote mkdir failed")
+
+
+def upload_file(
+    cfg: Dict[str, Union[bool, str, int, List[str]]], local_path: str, remote_dir: str
+) -> str:
+    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+    cmd = [
+        "rsync",
+        "-az",
+        "--mkpath",
+        "--info=progress2",
+        local_path,
+        f"{cfg['ssh_host']}:{remote_dir.rstrip('/') + '/'}",
+    ]
+
+    if subprocess.run(cmd).returncode != 0:
+        die("rsync transfer failed")
+
+    return os.path.join(remote_dir, os.path.basename(local_path))
+
+
+def walk_svgs(
+    roots: Union[
+        Sequence[Union[str, list[str], int, bool]], Union[str, list[str], int, bool]
+    ]
+    | None = None,
+    skip_globs: Union[
+        Sequence[Union[str, list[str], int, bool]], Union[str, list[str], int, bool]
+    ]
+    | None = None,
+) -> list[str]:
+    out: list[str] = []
+
+    # Normalize roots to a list
+    if roots is None:
+        roots_list = ["."]
+    elif isinstance(roots, (str, int, bool)):
+        roots_list = [str(roots)]
+    elif isinstance(roots, list):
+        roots_list = [str(r) for r in roots]
+    else:
+        roots_list = [str(r) for r in roots]
+
+    # Normalize skip_globs to a list
+    if skip_globs is None:
+        skip_globs_list: list[str] = []
+    elif isinstance(skip_globs, (str, int, bool)):
+        skip_globs_list = [str(skip_globs)]
+    elif isinstance(skip_globs, list):
+        skip_globs_list = [str(g) for g in skip_globs]
+    else:
+        skip_globs_list = [str(g) for g in skip_globs]
+
+    for root in roots_list:
+        root = os.path.abspath(os.path.expanduser(root))
+
+        if os.path.isfile(root) and root.lower().endswith(".svg"):
+            out.append(root)
+            continue
+
+        for r, dirs, files in os.walk(root):
+            if any(
+                fnmatch.fnmatch(r, str(pat)) or str(pat).strip("/").lower() in r.lower()
+                for pat in skip_globs_list
+            ):
+                dirs[:] = []
+                continue
+
+            for f in files:
+                if f.lower().endswith(".svg"):
+                    out.append(os.path.join(r, f))
+
+    out.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return out
+
+
+def list_remote_profiles(cfg: Dict[str, Union[bool, str, int, List[str]]]) -> List[str]:
+    r = run_ssh(
+        cfg,
+        r"find ~/.config/axitools/profiles -type f -name '*.py' -printf '%P\n' 2>/dev/null | sort",
+    )
+
+    if r.returncode != 0:
+        die(r.stderr.strip() or "failed to list remote profiles")
+
+    items: List[str] = []
+
+    for ln in r.stdout.splitlines():
+        ln = ln.strip()
+
+        if not ln:
+            continue
+
+        items.append(ln[:-3] if ln.endswith(".py") else ln)
+
+    return items
+
+
+def queue_choices(cfg: Dict[str, Union[bool, str, int, List[str]]]) -> List[str]:
+    r = run_ssh(cfg, "axq list")
+
+    if r.returncode != 0:
+        die(r.stderr.strip() or "axq list failed")
+
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+
+    # count only real jobs (avoid virtual "(swap)")
+    count = sum(1 for ln in lines if ") " in ln and not ln.strip().startswith("("))
+    choices = [f"append (after {count} item{'s' if count != 1 else ''})"]
+
+    for ln in lines:
+        if ") " not in ln or ln.strip().startswith("("):
+            continue
+
+        try:
+            idx = int(ln.split(")", 1)[0].strip())
+            rest = ln.split(")", 1)[1].strip()
+            choices.append(f"insert before #{idx}  {rest}")
+
+        except ValueError:
+            continue
+
+    return choices
+
+
+def fzf_select(
+    items: Sequence[str],
+    prompt: str = "> ",
+    multi: bool = False,
+    preview_cmd: Optional[str] = None,
+    header: Optional[str] = None,
+) -> list[str]:
+    display: list[str] = []
+    args = ["fzf", "--height", "80%", "--reverse", "--prompt", prompt]
+
+    if header:
+        args += ["--header", header]
+
+    if multi:
+        args += ["-m"]
+
+    if preview_cmd:
+        args += ["--preview", preview_cmd, "--preview-window", "right:60%"]
+
+    p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    try:
+        if p.stdin:
+            p.stdin.write("\n".join(items) + "\n")
+            p.stdin.flush()
+            p.stdin.close()
+
+    except BrokenPipeError:
+        pass
+
+    out, _ = p.communicate()
+
+    if p.returncode != 0:
+        die("selection cancelled")
+
+    return [ln for ln in out.splitlines() if ln.strip()]
+
+
+def connect(cfg: Dict[str, Union[bool, str, int, List[str]]]) -> str:
+    if not cfg["ssh_host"]:
+        die("ssh_host is required in ~/.config/axr.toml")
+
+    if cfg.get("require_ssh") and not os.environ.get("SSH_CONNECTION"):
+        print("warning: not inside an SSH session", file=sys.stderr)
+
+    if is_local_host(str(cfg["ssh_host"])) and not cfg.get("allow_local", False):
+        die("ssh_host looks local; set allow_local=true to override")
+
+    st = ssh_json(cfg, "axq status")
+    svg_base = str(st.get("svg_base") or cfg.get("remote_svg_base") or "")
+
+    print(f"Connected to {cfg['ssh_host']}. Remote svg_base: {svg_base or '(unknown)'}")
+    return svg_base
+
+
+def wizard(cfg: Dict[str, Union[bool, str, int, List[str]]]) -> None:
+    svg_base = connect(cfg)
+
+    print("\nScanning local SVGs...")
+    candidates = walk_svgs(cfg.get("svg_roots", ["."]), cfg.get("skip_globs", []))
+
+    if not candidates:
+        die("no SVGs found under configured svg_roots")
+
+    display: List[str] = []
+
+    for p in candidates:
+        rel = os.path.relpath(p, os.getcwd())
+        display.append(rel if not rel.startswith("..") else p)
+
+    preview = 'bash -lc \'set -e; f={}; echo PATH: $f; echo SIZE: $(stat -c %s "$f" 2>/dev/null || stat -f %z "$f") bytes; echo MTIME: $(date -r "$f" 2>/dev/null || stat -f %Sm "$f"); sed -n "1,60p" "$f"\''
+
+    picked_disp = fzf_select(
+        display,
+        prompt="SVG> ",
+        multi=True,
+        preview_cmd=preview,
+        header="SPACE to multi-select, ENTER to confirm",
+    )
+
+    if not picked_disp:
+        die("no SVG selected")
+
+    disp_map = {d: candidates[i] for i, d in enumerate(display)}
+    files = [disp_map[d] for d in picked_disp]
+
+    print("\nFetching remote profiles...")
+    profiles = list_remote_profiles(cfg)
+
+    if not profiles:
+        die("no profiles found on remote (~/.config/axitools/profiles)")
+
+    picked_profiles = fzf_select(
+        profiles, prompt="profiles> ", multi=True, header="Select one or more (SPACE)"
+    )
+
+    if not picked_profiles:
+        die("no profiles selected")
+
+    print("\nLoading remote queue...")
+
+    choices = queue_choices(cfg)
+    chosen = fzf_select(choices, prompt="queue> ")[0]
+    index: Optional[int] = None
+
+    if chosen.startswith("insert before #"):
+        try:
+            index = int(chosen.split("#", 1)[1].split()[0])
+
+        except (ValueError, IndexError):
+            index = None
+
+    print("\nPlan:")
+    print(f"  Files   : {len(files)}")
+    print(f"  Profiles: {', '.join(picked_profiles)}")
+    print(f"  Position: {'append' if index is None else f'insert before #{index}'}")
+
+    if input("Proceed? [y/N]: ").strip().lower() != "y":
+        die("aborted", 0)
+
+    remote_tmp = str(cfg["local_temp_dir"])
+    ensure_remote_dir(cfg, remote_tmp)
+    add_order = list(reversed(files)) if index is not None else files
+    ok = 0
+    fail = 0
+
+    for path in add_order:
+        try:
+            remote_path = upload_file(cfg, path, remote_tmp)
+            arg = os.path.basename(remote_path) if svg_base else remote_path
+            profs = ",".join(picked_profiles)
+
+            cmd = (
+                f"axq add {shlex.quote(arg)} {shlex.quote(profs)}"
+                if index is None
+                else f"axq add {index} {shlex.quote(arg)} {shlex.quote(profs)}"
+            )
+
+            r = run_ssh(cfg, cmd)
+
+            if r.returncode != 0:
+                print(
+                    f"FAIL {os.path.basename(path)} → {r.stderr.strip()}",
+                    file=sys.stderr,
+                )
+                fail += 1
+
+            else:
+                print(f"OK   {os.path.basename(path)} → {r.stdout.strip()}")
+                ok += 1
+            time.sleep(0.05)
+
+        except Exception as e:
+            print(f"FAIL {os.path.basename(path)} → {e}", file=sys.stderr)
+            fail += 1
+
+    print(f"\nDone. queued={ok}, failed={fail}")
+
+
+def main() -> None:
+    cfg = load_toml(CONF)
+
+    _ = argparse.ArgumentParser(
+        prog="axr", description="AxiDraw Remote (fzf wizard)"
+    ).parse_args()
+
+    wizard(cfg)
+
+
+if __name__ == "__main__":
+    main()

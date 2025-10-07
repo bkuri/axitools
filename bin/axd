@@ -1,0 +1,707 @@
+#!/usr/bin/env python3
+
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import sys
+import time
+import uuid
+import urllib.request
+from collections import OrderedDict
+
+
+HOME = os.path.expanduser("~")
+DATA = os.path.join(HOME, ".local", "share", "axq")
+SOCK = os.path.join(HOME, ".cache", "axq.sock")
+CONF = os.path.join(HOME, ".config", "axq.toml")
+
+DIR_DONE = os.path.join(DATA, "done")
+DIR_FAIL = os.path.join(DATA, "fail")
+DIR_LOGS = os.path.join(DATA, "logs")
+DIR_QUEUE = os.path.join(DATA, "queue")
+DIR_WORK = os.path.join(DATA, "working")
+
+CFG = {
+    "bind": "127.0.0.1:8787",
+    "token": "",
+    "ntfy_url": "",
+    "ntfy_topic": "",
+    "ntfy_token": "",
+    "default_pause_between": True,
+    "svg_base": "",
+}
+
+STATE = {
+    "control_url_base": None,
+    "current": None,
+    "last_job": None,
+    "last_tags": None,
+    "paused": False,
+    "pending_swap": None,
+    "queue_len": 0,
+    "setup_gate": False,
+    "since": int(time.time()),
+    "status": "idle",
+}
+
+
+def load_toml():
+    try:
+        if os.path.exists(CONF):
+            import tomllib
+
+            with open(CONF, "rb") as f:
+                CFG.update(tomllib.load(f))
+
+    except Exception as e:
+        print(f"[axd] warn: {e}", file=sys.stderr)
+
+
+def job_path(jid, base=DIR_QUEUE):
+    return os.path.join(base, f"{jid}.json")
+
+
+def load_job(path: str) -> dict[str, str | list[str] | int]:
+    return json.load(open(path, "r", encoding="utf-8"))
+
+
+def save_json(path: str, obj: dict[str, str | list[str] | int]) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False))
+    _ = os.replace(tmp, path)
+
+
+def list_jobs() -> list[str]:
+    files = [f for f in os.listdir(DIR_QUEUE) if f.endswith(".json")]
+    files.sort(key=lambda x: os.path.getmtime(os.path.join(DIR_QUEUE, x)))
+    return [os.path.join(DIR_QUEUE, f) for f in files]
+
+
+def jobs_indexed() -> list[tuple[int, str, dict[str, str | list[str] | int]]]:
+    paths = list_jobs()
+    out = []
+
+    for i, p in enumerate(paths, 1):
+        try:
+            j = load_job(p)
+
+        except Exception:
+            j = {"id": os.path.basename(p).split(".")[0], "svg": "?", "profiles": []}
+
+        out.append((i, p, j))
+
+    return out
+
+
+def extract_tags(job: dict[str, str | list[str] | int]) -> tuple[str, str] | None:
+    pen = col = None
+
+    profiles = job.get("profiles") or []
+    if not isinstance(profiles, list):
+        return None
+    for p in profiles:
+        if not isinstance(p, str):
+            continue
+        if p.startswith("pen/"):
+            pen = p.split("/", 1)[1]
+
+        if p.startswith("color/"):
+            col = p.split("/", 1)[1]
+
+    return (pen, col) if (pen and col) else None
+
+
+def retime_with_insert(new_path: str, index: int | None) -> None:
+    queued = list_jobs()
+
+    order = (
+        queued + [new_path]
+        if not index or index < 1 or index > len(queued) + 1
+        else queued[: index - 1] + [new_path] + queued[index - 1 :]
+    )
+
+    base_ns = time.time_ns()
+    step = 1_000
+
+    for i, p in enumerate(order):
+        ns = base_ns + i * step
+        os.utime(p, ns=(ns, ns))
+
+
+def send_ntfy(title: str, message: str) -> None:
+    ntfy_url = CFG.get("ntfy_url")
+    ntfy_topic = CFG.get("ntfy_topic")
+
+    if not ntfy_url or not ntfy_topic:
+        return
+
+    try:
+        url = str(ntfy_url).rstrip("/") + "/" + str(ntfy_topic)
+        req = urllib.request.Request(url, method="POST")
+
+        ntfy_token = CFG.get("ntfy_token")
+        if ntfy_token:
+            req.add_header("Authorization", f"Bearer {ntfy_token}")
+
+        req.add_header("Title", title)
+        req.add_header("Content-Type", "text/plain; charset=utf-8")
+
+        urllib.request.urlopen(req, data=message.encode()).close()
+
+    except Exception as e:
+        print(f"[axd] ntfy error: {e}", file=sys.stderr)
+
+
+async def run_job(job: dict[str, str | list[str] | int]) -> None:
+    jid = str(job["id"])
+    svg = str(job["svg"])
+    profs_raw = job.get("profiles", [])
+    profs = (
+        [str(p) for p in profs_raw if isinstance(profs_raw, list)]
+        if isinstance(profs_raw, list)
+        else []
+    )
+    cmd = ["axp"] + profs + ["--", "axicli", "-m", "plot", svg]
+    logp = os.path.join(DIR_LOGS, f"{jid}.log")
+    rx = re.compile(r"(\d+)%")
+
+    with open(logp, "w", encoding="utf-8") as log:
+        current_job = {
+            "id": jid,
+            "profiles": profs,
+            "progress": 0,
+            "started": int(time.time()),
+            "svg": svg,
+        }
+        STATE["current"] = json.dumps(current_job)
+
+        save_json(job_path(jid, DIR_WORK), job)
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+        )
+
+        if proc.stdout:
+            async for line_b in proc.stdout:
+                line = line_b.decode("utf-8", "replace").rstrip()
+                log.write(line + "\n")
+                log.flush()
+                if isinstance(STATE.get("current"), str):
+                    current_data = json.loads(STATE["current"])
+                    current_data["last"] = line
+                    STATE["current"] = json.dumps(current_data)
+                    m = rx.search(line)
+
+                    if m:
+                        current_data["progress"] = int(m.group(1))
+                        STATE["current"] = json.dumps(current_data)
+
+        rc = await proc.wait()
+        if isinstance(STATE.get("current"), str):
+            current_data = json.loads(STATE["current"])
+            current_data["rc"] = rc
+            STATE["current"] = json.dumps(current_data)
+
+
+async def worker():
+    while True:
+        await asyncio.sleep(0.2)
+
+        if STATE["paused"] or STATE["current"]:
+            continue
+
+        if STATE["pending_swap"]:
+            next_q = list_jobs()
+            if next_q:
+                job_data = load_job(next_q[0])
+                profiles = job_data.get("profiles") or []
+                if isinstance(profiles, list):
+                    profs = [str(p) for p in profiles]
+                else:
+                    profs = []
+            else:
+                profs = []
+
+            try:
+                await (
+                    await asyncio.create_subprocess_exec(
+                        "axp",
+                        *profs,
+                        "--",
+                        "up",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                ).wait()
+
+            except Exception:
+                pass
+
+            STATE["setup_gate"] = True
+            STATE["status"] = "waiting_setup"
+            STATE["pending_swap"] = None
+            continue
+
+        if STATE["setup_gate"]:
+            STATE["status"] = "waiting_setup"
+            continue
+
+        q = list_jobs()
+        STATE["queue_len"] = len(q)
+
+        if not q:
+            STATE["status"] = "idle"
+            continue
+
+        path = q[0]
+        job = load_job(path)
+        jid = job["id"]
+        shutil.move(path, job_path(jid, DIR_WORK))
+
+        STATE["status"] = "running"
+
+        profiles = job.get("profiles") or []
+        if isinstance(profiles, list):
+            profiles_str = [str(p) for p in profiles]
+        else:
+            profiles_str = []
+        send_ntfy(
+            "AxiDraw: started",
+            f"{jid}\nprofiles: {','.join(profiles_str)}\n{job['svg']}",
+        )
+
+        try:
+            rc = await run_job(job)
+
+            shutil.move(
+                job_path(jid, DIR_WORK),
+                job_path(jid, DIR_DONE if rc == 0 else DIR_FAIL),
+            )
+
+        except Exception:
+            try:
+                shutil.move(job_path(jid, DIR_WORK), job_path(jid, DIR_FAIL))
+
+            except Exception:
+                pass
+
+            STATE["current"] = None
+            STATE["last_job"] = json.dumps(
+                {"id": jid, "rc": -1, "svg": str(job["svg"])}
+            )
+
+        finally:
+            last_job_str = STATE.get("last_job", "{}")
+            if isinstance(last_job_str, str):
+                last_job = json.loads(last_job_str)
+                ok = last_job.get("rc", -1) == 0
+            else:
+                ok = False
+
+            send_ntfy(
+                f"AxiDraw: {'done' if ok else 'failed'}",
+                f"{jid}  rc={(STATE['current'] or {}).get('rc')}",
+            )
+
+            if ok:
+                current_str = STATE.get("current")
+                if isinstance(current_str, str):
+                    current_data = json.loads(current_str)
+                    rc = current_data.get("rc", -1)
+                else:
+                    rc = -1
+                STATE["last"] = json.dumps(
+                    {
+                        "id": jid,
+                        "rc": rc,
+                        "svg": job["svg"],
+                    }
+                )
+
+                tags_result = extract_tags(job)
+                STATE["tags"] = json.dumps(tags_result) if tags_result else ""
+
+            STATE["current"] = None
+            q = list_jobs()
+            STATE["queue_len"] = len(q)
+
+            if q:
+                next_job = load_job(q[0])
+                next_tags = extract_tags(next_job)
+
+                if next_tags and STATE["last_tags"]:
+                    last_tags_json = STATE["last_tags"]
+                    if isinstance(last_tags_json, str):
+                        try:
+                            last_tags_tuple = json.loads(last_tags_json)
+                            if isinstance(last_tags_tuple, tuple) and len(last_tags_tuple) == 2:
+                                if next_tags != last_tags_tuple:
+                                    STATE["pending_swap"] = json.dumps(next_tags)
+                                    STATE["status"] = "waiting_setup"
+                                    continue
+                        except json.JSONDecodeError:
+                            pass
+                    elif isinstance(last_tags_json, tuple) and next_tags != last_tags_json:
+                        STATE["pending_swap"] = json.dumps(next_tags)
+                        STATE["status"] = "waiting_setup"
+                        continue
+
+            if CFG.get("default_pause_between", True) and STATE["queue_len"] > 0:
+                STATE["setup_gate"] = True
+                STATE["status"] = "waiting_setup"
+
+            else:
+                STATE["status"] = "idle" if STATE["queue_len"] == 0 else "waiting"
+
+
+async def handle_sock(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    try:
+        data = await reader.readline()
+
+        if not data:
+            return
+
+        req = json.loads(data.decode())
+        cmd = req.get("cmd")
+        out = {}
+
+        if cmd == "status":
+            out = {
+                "control": STATE["control_url_base"],
+                "current": STATE["current"],
+                "paused": STATE["paused"],
+                "queue_len": STATE["queue_len"],
+                "setup_gate": STATE["setup_gate"],
+                "since": STATE["since"],
+                "status": STATE["status"],
+                "svg_base": CFG.get("svg_base", ""),
+            }
+
+        if cmd == "list":
+            items = jobs_indexed()
+            out_items = []
+            prev = STATE.get("last_tags")
+            prev_tuple = None
+
+            if isinstance(prev, str):
+                try:
+                    prev_tuple = json.loads(prev)
+                    if not isinstance(prev_tuple, tuple) or len(prev_tuple) != 2:
+                        prev_tuple = None
+                except json.JSONDecodeError:
+                    prev_tuple = None
+            elif isinstance(prev, tuple) and len(prev) == 2:
+                prev_tuple = prev
+
+            for i, p, j in items:
+                cur = extract_tags(j) if isinstance(j, dict) else None
+
+                if cur and prev_tuple and cur != prev_tuple:
+                    out_items.append(
+                        {
+                            "id": "(swap)",
+                            "n": len(out_items) + 1,
+                            "profiles": ["(virtual)"],
+                            "svg": f"pen/{cur[0]},color/{cur[1]}",
+                        }
+                    )
+
+                if isinstance(j, dict):
+                    out_items.append(
+                        {
+                            "id": j.get("id", "unknown"),
+                            "n": len(out_items) + 1,
+                            "profiles": j.get("profiles", []),
+                            "svg": j.get("svg", ""),
+                        }
+                    )
+
+                prev = cur or prev
+
+            out = {"items": out_items}
+
+        elif cmd == "add":
+            svg = os.path.abspath(req["svg"])
+            profs = list(req.get("profiles", []))
+            idx = req.get("index")
+            jid = uuid.uuid4().hex[:12]
+            job = {"id": jid, "svg": svg, "profiles": profs, "queued": int(time.time())}
+            path = job_path(jid, DIR_QUEUE)
+            save_json(path, job)
+            retime_with_insert(path, int(idx) if idx is not None else None)
+            STATE["queue_len"] = len(list_jobs())
+            out = {"id": jid}
+
+        elif cmd == "remove":
+            n = int(req.get("n", 0))
+            items = jobs_indexed()
+            hit = next((t for t in items if t[0] == n), None)
+            out = {"ok": False} if not hit else (os.remove(hit[1]) or {"ok": True})
+            STATE["queue_len"] = len(list_jobs())
+
+        elif cmd == "move":
+            from_n = int(req.get("from"))
+            to_n = int(req.get("to"))
+            items = jobs_indexed()
+
+            if from_n < 1 or from_n > len(items) or to_n < 1 or to_n > len(items):
+                out = {"ok": False, "error": "index_out_of_range"}
+
+            else:
+                moving = items[from_n - 1][1]
+                paths = [p for _, p, _ in items if p != moving]
+                if moving is not None:
+                    paths.insert(to_n - 1, moving)
+                base_ns = time.time_ns()
+                step = 1_000
+
+                for i, p in enumerate(paths):
+                    ns = base_ns + i * step
+                    os.utime(p, ns=(ns, ns))
+
+                out = {"ok": True}
+                STATE["queue_len"] = len(list_jobs())
+
+        elif cmd == "bottom":
+            n = int(req.get("n"))
+            items = jobs_indexed()
+
+            if not (1 <= n <= len(items)):
+                out = {"ok": False, "error": "index_out_of_range"}
+
+            else:
+                moving = items[n - 1][1] if n <= len(items) else None
+                if moving:
+                    paths = [p for _, p, _ in items if p != moving]
+                    paths.append(moving)
+                    base_ns = time.time_ns()
+                    step = 1_000
+
+                    for i, p in enumerate(paths):
+                        ns = base_ns + i * step
+                        os.utime(p, ns=(ns, ns))
+                out = {"ok": True}
+                STATE["queue_len"] = len(list_jobs())
+
+        elif cmd == "pause":
+            STATE["paused"] = True
+            out = {"ok": True}
+
+        elif cmd == "resume":
+            STATE["paused"] = False
+            STATE["setup_gate"] = False
+            out = {"ok": True}
+
+        elif cmd == "cancel_current":
+            if STATE["current"]:
+                # best-effort: find work file by id, otherwise SIGTERM current axicli not tracked here
+                out = {"ok": True}
+
+            else:
+                out = {"ok": False}
+
+        elif cmd == "swap_now":
+            next_q = list_jobs()
+            if next_q:
+                job_data = load_job(next_q[0])
+                profiles = job_data.get("profiles") or []
+                if isinstance(profiles, list):
+                    profs = [str(p) for p in profiles]
+                else:
+                    profs = []
+            else:
+                profs = []
+
+            try:
+                await (
+                    await asyncio.create_subprocess_exec(
+                        "axp",
+                        *profs,
+                        "--",
+                        "up",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                ).wait()
+
+            except Exception:
+                pass
+
+            STATE["setup_gate"] = True
+            STATE["status"] = "waiting_setup"
+            out = {"ok": True}
+
+        elif cmd == "optimize":
+            dry = bool(req.get("dry", False))
+            items = jobs_indexed()
+
+            def tags(j: dict[str, str | list[str] | int]) -> tuple[str, str] | None:
+                t = extract_tags(j)
+                return t if t else None
+
+            with_t = [
+                (i, p, j, tags(j))
+                for i, p, j in items
+                if isinstance(j, dict) and tags(j)
+            ]
+            without = [
+                (i, p, j) for i, p, j in items if isinstance(j, dict) and not tags(j)
+            ]
+            groups = OrderedDict()
+
+            for i, p, j, t in with_t:
+                groups.setdefault(t, []).append((i, p, j))
+
+            planned = [p for _, arr in groups.items() for _, p, _ in arr] + [
+                p for _, p, _ in without
+            ]
+
+            if dry:
+                path_to = {p: j for _, p, j in items}
+                plan = []
+
+                for n, p in enumerate(planned, 1):
+                    j = path_to[p]
+                    if isinstance(j, dict):
+                        plan.append(
+                            {
+                                "n": n,
+                                "id": j.get("id", "unknown"),
+                                "svg": j.get("svg", ""),
+                                "profiles": j.get("profiles", []),
+                            }
+                        )
+
+                out = {"dry_run": True, "plan": plan}
+
+            else:
+                base_ns = time.time_ns()
+                step = 1_000
+
+                for k, p in enumerate(planned):
+                    ns = base_ns + k * step
+                    os.utime(p, ns=(ns, ns))
+
+                STATE["queue_len"] = len(list_jobs())
+
+                out = {
+                    "ok": True,
+                    "groups": [
+                        {"pen": k[0], "color": k[1], "count": len(v)}
+                        for k, v in groups.items()
+                    ],
+                }
+
+        else:
+            out = {"error": "bad_cmd"}
+
+    except Exception as e:
+        out = {"error": str(e)}
+
+    writer.write((json.dumps(out) + "\n").encode())
+    await writer.drain()
+    writer.close()
+
+
+async def handle_http(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> None:
+    try:
+        data = await reader.read(2048)
+        line = data.split(b"\r\n", 1)[0].decode(errors="ignore")
+        parts = line.split()
+        path = parts[1] if len(parts) >= 2 else "/"
+
+        from urllib.parse import urlparse, parse_qs
+
+        u = urlparse(path)
+        qs = parse_qs(u.query)
+        token = (qs.get("token") or [""])[0]
+        c = (qs.get("cmd") or [""])[0]
+        ok = False
+
+        if token == CFG.get("token") and c in ("resume", "skip", "cancel"):
+            if c == "resume":
+                STATE["setup_gate"] = False
+                STATE["paused"] = False
+                ok = True
+
+            elif c == "skip":
+                items = jobs_indexed()
+
+                if items:
+                    if items:
+                        _, path, _ = items[0]
+                        os.remove(path)
+                    STATE["queue_len"] = len(list_jobs())
+                    ok = True
+
+            elif c == "cancel":
+                # non-invasive cancel; rely on cancel-current socket if needed
+                ok = True
+
+        body = b"OK" if ok else b"ERR"
+
+        resp = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\n\r\n"
+            + body
+        )
+
+        writer.write(resp)
+        await writer.drain()
+
+    except Exception:
+        pass
+
+    finally:
+        writer.close()
+
+
+async def main():
+    load_toml()
+
+    for d in (DIR_DONE, DIR_FAIL, DIR_LOGS, DIR_QUEUE, DIR_WORK):
+        os.makedirs(d, exist_ok=True)
+
+    try:
+        os.unlink(SOCK)
+
+    except FileNotFoundError:
+        pass
+
+    sock_srv = await asyncio.start_unix_server(handle_sock, path=SOCK)
+    os.chmod(SOCK, 0o600)
+    http_srv = None
+
+    if CFG.get("token"):
+        bind_addr = CFG.get("bind", "127.0.0.1:8787")
+        if isinstance(bind_addr, str):
+            host, port = bind_addr.split(":")
+        else:
+            host, port = "127.0.0.1", "8787"
+        http_srv = await asyncio.start_server(handle_http, host, int(port))
+        STATE["control_url_base"] = f"http://{host}:{port}"
+
+    _ = asyncio.create_task(worker())
+
+    async with sock_srv:
+        if http_srv:
+            async with http_srv:
+                _ = await asyncio.gather(
+                    sock_srv.serve_forever(), http_srv.serve_forever()
+                )
+
+        else:
+            await sock_srv.serve_forever()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

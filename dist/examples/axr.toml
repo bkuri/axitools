@@ -1,0 +1,10 @@
+ssh_host = "user@remote-machine"
+ssh_port = 22
+remote_svg_base = ""
+local_temp_dir = "/tmp/axr"
+identity_file = ""
+proxy_command = ""
+require_ssh = false
+allow_local = false
+svg_roots = ["."]
+skip_globs = ["**/.git/**","**/.cache/**","**/drafts/**"]

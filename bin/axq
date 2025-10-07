@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+
+import json
+import os
+import socket
+import sys
+import tomllib
+
+
+HOME = os.path.expanduser("~")
+SOCK = os.path.join(HOME, ".cache", "axq.sock")
+CONF = os.path.join(HOME, ".config", "axq.toml")
+CFG = {"svg_base": ""}
+
+
+def load_toml() -> None:
+    try:
+        if os.path.exists(CONF):
+            with open(CONF, "rb") as f:
+                CFG.update(tomllib.load(f))
+
+    except Exception:
+        pass
+
+
+def send(
+    req: dict[str, str | int | list[str]],
+) -> dict[str, str | int | list[dict[str, str | int | list[str]]]]:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(SOCK)
+    s.sendall((json.dumps(req) + "\n").encode())
+    buf = b""
+
+    while True:
+        b = s.recv(65536)
+
+        if not b:
+            break
+
+        buf += b
+
+    return json.loads(buf.decode().splitlines()[-1]) if buf else {}
+
+
+def usage() -> None:
+    print(
+        "axq add <svg> <profiles> | axq add <index> <svg> <profiles> | axq add <svg> <profiles> <index>"
+    )
+
+    print(
+        "axq list | axq remove <n> | axq move <from> <to> | axq top <n> | axq bottom <n>"
+    )
+
+    print("axq status | axq pause | axq resume | axq cancel-current | axq swap-now")
+    sys.exit(2)
+
+
+def resolve_svg(s: str) -> str:
+    s = os.path.expanduser(s)
+
+    if os.path.isabs(s) or "/" in s:
+        return os.path.abspath(s)
+
+    base = os.path.expanduser(CFG.get("svg_base", ""))
+    return os.path.abspath(os.path.join(base, s)) if base else os.path.abspath(s)
+
+
+def add_indexed(args: list[str]) -> None:
+    idx: int | None = None
+
+    if len(args) == 2:
+        svg, profs = args
+
+    elif len(args) == 3 and args[0].isdigit():
+        idx = int(args[0])
+        svg, profs = args[1], args[2]
+
+    elif len(args) == 3 and args[2].isdigit():
+        svg, profs, idx = args[0], args[1], int(args[2])
+
+    else:
+        usage()
+        return
+
+    prof_list = [p for p in (profs.split(",") if profs else []) if p]
+    svg_path = resolve_svg(svg)
+    req_dict: dict[str, str | int | list[str]] = {
+        "cmd": "add",
+        "svg": svg_path,
+        "profiles": prof_list,
+    }
+    if idx is not None:
+        req_dict["index"] = idx
+    res = send(req_dict)
+    result_id = res.get("id")
+    if result_id and isinstance(result_id, str):
+        print(result_id)
+
+
+def main() -> None:
+    load_toml()
+
+    if len(sys.argv) < 2:
+        usage()
+
+    cmd = sys.argv[1]
+
+    if cmd == "add":
+        add_indexed(sys.argv[2:])
+
+    elif cmd == "list":
+        res = send({"cmd": "list"})
+        items = res.get("items", [])
+
+        if not items:
+            print("0 queued")
+            return
+
+        if isinstance(items, list):
+            for item in items:
+                if item:
+                    profiles = item.get("profiles", [])
+                    if isinstance(profiles, list):
+                        ps = ",".join(str(p) for p in profiles)
+                    else:
+                        ps = ""
+                    item_n = str(item.get("n", ""))
+                    item_id = str(item.get("id", ""))
+                    item_svg = str(item.get("svg", ""))
+                    print(f"{item_n}) {item_id}  {ps}  {item_svg}")
+
+    elif cmd == "remove":
+        print(
+            "removed"
+            if send({"cmd": "remove", "n": int(sys.argv[2])}).get("ok")
+            else "not found"
+        )
+
+    elif cmd == "move":
+        res = send({"cmd": "move", "from": int(sys.argv[2]), "to": int(sys.argv[3])})
+        print("moved" if res.get("ok") else f"error: {res.get('error')}")
+
+    elif cmd == "top":
+        res = send({"cmd": "top", "n": int(sys.argv[2])})
+        print("moved" if res.get("ok") else f"error: {res.get('error')}")
+
+    elif cmd == "bottom":
+        res = send({"cmd": "bottom", "n": int(sys.argv[2])})
+        print("moved" if res.get("ok") else f"error: {res.get('error')}")
+
+    elif cmd in ("status", "pause", "resume"):
+        print(json.dumps(send({"cmd": cmd}), indent=2))
+
+    elif cmd == "cancel-current":
+        print(json.dumps(send({"cmd": "cancel_current"}), indent=2))
+
+    elif cmd == "swap-now":
+        print(json.dumps(send({"cmd": "swap_now"}), indent=2))
+
+    else:
+        usage()
+
+
+if __name__ == "__main__":
+    main()

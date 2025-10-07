@@ -1,0 +1,32 @@
+post_install() {
+    echo "==> axitools-client installed!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Copy example config:"
+    echo "     mkdir -p ~/.config && cp /usr/share/doc/axitools-client/examples/axr.toml ~/.config/axr.toml"
+    echo ""
+    echo "  2. Edit ~/.config/axr.toml with your SSH settings (ssh_host, remote_svg_base, etc.)"
+    echo ""
+    echo "  3. Test the installation:"
+    echo "     axr --help"
+    echo ""
+    echo "See /usr/share/doc/axitools-client/axr.md for detailed usage instructions."
+}
+
+post_upgrade() {
+    echo "==> axitools-client upgraded successfully!"
+    echo ""
+    echo "You may want to:"
+    echo "  - Compare your config with the new example: /usr/share/doc/axitools-client/examples/axr.toml"
+    echo "  - Check for new features in: /usr/share/doc/axitools-client/axr.md"
+}
+
+post_remove() {
+    echo "==> axitools-client removed."
+    echo ""
+    echo "Your user configuration has been preserved:"
+    echo "  - Config: ~/.config/axr.toml"
+    echo ""
+    echo "To completely remove all axitools-client data:"
+    echo "  rm -rf ~/.config/axr.toml"
+}
