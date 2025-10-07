@@ -1,0 +1,7 @@
+bind = "127.0.0.1:8787"
+token = "change-me-long-random"
+ntfy_url   = "https://ntfy.sh"
+ntfy_topic = "axitools"
+ntfy_token = ""
+default_pause_between = true
+svg_base = "~/plots"

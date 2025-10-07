@@ -1,0 +1,57 @@
+post_install() {
+    echo "==> Setting up axitools..."
+
+    # Create system-wide example directories (for reference)
+    mkdir -p /usr/share/axitools/profiles/{pen,color,speed,paper,ui}
+
+    echo "==> axitools installation complete!"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Copy example config:"
+    echo "     mkdir -p ~/.config && cp /etc/axitools/axq.toml.example ~/.config/axq.toml"
+    echo ""
+    echo "  2. Edit ~/.config/axq.toml with your settings (token, ntfy, svg_base)"
+    echo ""
+    echo "  3. Copy profile templates:"
+    echo "     mkdir -p ~/.config/axitools && cp -r /usr/share/axitools/profiles ~/.config/axitools/"
+    echo ""
+    echo "  4. Create data directories:"
+    echo "     mkdir -p ~/.local/share/axq/{queue,working,done,fail,logs}"
+    echo ""
+    echo "  5. Install AxiDraw Python library:"
+    echo "     pip install --user pyaxidraw"
+    echo ""
+    echo "  6. Enable and start the daemon:"
+    echo "     systemctl --user enable --now axd"
+    echo ""
+    echo "  7. Test the installation:"
+    echo "     axq status"
+    echo ""
+    echo "See /usr/share/doc/axitools/README.md for detailed usage instructions."
+}
+
+post_upgrade() {
+    echo "==> axitools upgraded successfully!"
+    echo ""
+    echo "You may want to:"
+    echo "  - Compare your config with the new example: /etc/axitools/axq.toml.example"
+    echo "  - Check for new profile examples in: /usr/share/axitools/profiles/"
+    echo "  - Restart the daemon: systemctl --user restart axd"
+    echo ""
+    echo "See /usr/share/doc/axitools/README.md for any new features or changes."
+}
+
+post_remove() {
+    echo "==> axitools removed."
+    echo ""
+    echo "Your user configuration and data have been preserved:"
+    echo "  - Config: ~/.config/axq.toml"
+    echo "  - Profiles: ~/.config/axitools/profiles/"
+    echo "  - Queue data: ~/.local/share/axq/"
+    echo ""
+    echo "The systemd user service may still be active. To stop and disable:"
+    echo "  systemctl --user disable --now axd"
+    echo ""
+    echo "To completely remove all axitools data:"
+    echo "  rm -rf ~/.config/axq.toml ~/.config/axitools ~/.local/share/axq"
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=AxiDraw queue daemon (axd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/bin/axd
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
