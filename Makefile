@@ -19,6 +19,8 @@ SRC_AXQ   := bin/axq
 SRC_AXR   := bin/axr
 SRC_UNIT  := dist/axd.service
 SRC_BASE  := dist/profiles/base.py
+SRC_AXQ_CONF := dist/examples/axq.toml
+SRC_AXR_CONF := dist/examples/axr.toml
 
 # Optional tag-only example profiles
 SRC_PEN_GEL   := dist/profiles/pen/gel.py
@@ -51,7 +53,9 @@ install: dirs
 	@if [ -f "$(SRC_PEN_GEL)" ] && [ ! -f "$(AXI_PROF)/pen/gel.py" ]; then install -Dm644 "$(SRC_PEN_GEL)" "$(AXI_PROF)/pen/gel.py"; fi
 	@if [ -f "$(SRC_COLOR_BLK)" ] && [ ! -f "$(AXI_PROF)/color/black.py" ]; then install -Dm644 "$(SRC_COLOR_BLK)" "$(AXI_PROF)/color/black.py"; fi
 	@# example axq config (won't overwrite)
-	@if [ ! -f "$(AXQ_CONF)" ]; then \
+	@if [ ! -f "$(AXQ_CONF)" ] && [ -f "$(SRC_AXQ_CONF)" ]; then \
+	  cp "$(SRC_AXQ_CONF)" "$(AXQ_CONF)"; \
+	elif [ ! -f "$(AXQ_CONF)" ]; then \
 	  echo 'bind = "127.0.0.1:8787"'               > "$(AXQ_CONF)"; \
 	  echo 'token = "change-me-long-random"'      >> "$(AXQ_CONF)"; \
 	  echo 'ntfy_url   = ""'                      >> "$(AXQ_CONF)"; \
@@ -99,7 +103,9 @@ install-server: dirs
 install-client:
 	@mkdir -p "$(BIN_DIR)" "$(CONF_DIR)"
 	@install -Dm755 "$(SRC_AXR)" "$(BIN_DIR)/axr"
-	@if [ ! -f "$(AXR_CONF)" ]; then \
+	@if [ ! -f "$(AXR_CONF)" ] && [ -f "$(SRC_AXR_CONF)" ]; then \
+	  cp "$(SRC_AXR_CONF)" "$(AXR_CONF)"; \
+	elif [ ! -f "$(AXR_CONF)" ]; then \
 	  echo 'ssh_host = "user@remote-machine"'  >  "$(AXR_CONF)"; \
 	  echo 'ssh_port = 22'                    >> "$(AXR_CONF)"; \
 	  echo 'remote_svg_base = ""'             >> "$(AXR_CONF)"; \
