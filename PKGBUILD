@@ -46,7 +46,7 @@ package_axitools-server() {
     'ntfy-sh: push notifications (if you use webhook endpoints)'
     'openssh: handy for admin via ssh'
   )
-  install="${srcdir}/axitools-server.install"
+  install=axitools-server.install
 
   cd "${srcdir}/axitools"
 
@@ -82,7 +82,7 @@ package_axitools-client() {
   optdepends=(
     'python: for running axr (already required)'
   )
-  install="${srcdir}/axitools-client.install"
+  install=axitools-client.install
 
   cd "${srcdir}/axitools"
 
