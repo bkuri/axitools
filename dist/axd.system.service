@@ -1,0 +1,19 @@
+[Unit]
+Description=AxiDraw queue daemon (axd, system)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=axitools
+Group=axitools
+ExecStart=/usr/bin/axd
+Restart=on-failure
+RestartSec=2
+# Use system-wide config by default:
+Environment=AXQ_CONFIG=/etc/axitools/axq.toml
+# Optional: set a different working dir for logs/queue
+WorkingDirectory=/var/lib/axitools
+
+[Install]
+WantedBy=multi-user.target

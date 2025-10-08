@@ -1,0 +1,14 @@
+[Unit]
+Description=AxiDraw queue daemon (axd, user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/bin/axd
+Restart=on-failure
+RestartSec=2
+# Optional: point to user-specific config
+# Environment=AXQ_CONFIG=%h/.config/axq.toml
+
+[Install]
+WantedBy=default.target

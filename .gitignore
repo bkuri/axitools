@@ -3,6 +3,9 @@
 *.pkg.tar.xz
 *.pkg.tar.gz
 
+# Old files
+old/
+
 # Makepkg directories
 pkg/
 src/

@@ -2,7 +2,7 @@
 
 pkgbase=axitools
 pkgname=(axitools-server axitools-client)
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Minimal AxiDraw headless queue: axd (daemon), axq (client), axp (profiles), axr (remote wizard)"
 arch=(any)
@@ -35,10 +35,12 @@ package_axitools-server() {
     rsync
     systemd
   )
+
   optdepends=(
     'ntfy-sh: push notifications if you wire webhooks'
     'openssh: handy for admin via ssh'
   )
+
   install=axitools.install
   provides=(axitools axd axq axp)
   conflicts=(axitools)
@@ -73,6 +75,7 @@ package_axitools-client() {
     rsync
     openssh
   )
+
   install=axitools.install
   provides=(axitools axr)
   conflicts=(axitools)
