@@ -68,7 +68,7 @@ package_axitools-server() {
   install -Dm644 dist/profiles/color/black.py "${pkgdir}${_doc}/axitools-server/examples/profiles/color/black.py"
 
   # Example config templates
-  install -Dm644 dist/examples/axq.toml "${pkgdir}${_doc}/axitools-server/examples/axq.toml"
+  install -Dm644 dist/axq.toml "${pkgdir}${_doc}/axitools-server/examples/axq.toml"
 }
 
 package_axitools-client() {
