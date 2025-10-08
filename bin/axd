@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-
 import asyncio
 import json
 import os
@@ -12,11 +11,13 @@ import uuid
 import urllib.request
 from collections import OrderedDict
 
+# Add lib directory to path for shared utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
+from config import load_config
 
 HOME = os.path.expanduser("~")
 DATA = os.path.join(HOME, ".local", "share", "axq")
 SOCK = os.path.join(HOME, ".cache", "axq.sock")
-CONF = os.path.join(HOME, ".config", "axq.toml")
 
 DIR_DONE = os.path.join(DATA, "done")
 DIR_FAIL = os.path.join(DATA, "fail")
@@ -50,12 +51,10 @@ STATE = {
 
 def load_toml():
     try:
-        if os.path.exists(CONF):
-            import tomllib
-
-            with open(CONF, "rb") as f:
-                CFG.update(tomllib.load(f))
-
+        config, path = load_config("axq")
+        CFG.update(config)
+        if path:
+            print(f"[axd] using config: {path}", file=sys.stderr)
     except Exception as e:
         print(f"[axd] warn: {e}", file=sys.stderr)
 

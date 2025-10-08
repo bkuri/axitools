@@ -1,41 +1,34 @@
 # Maintainer: bkuri <aur+axitools@bkuri.com>
+
 pkgbase=axitools
 pkgname=(axitools-server axitools-client)
 pkgver=0.1.0
 pkgrel=1
-pkgdesc_server="Minimal AxiDraw headless queue: axd(axitools daemon), axq(client), axp(profile combiner), axr(remote fzf wizard)"
-pkgdesc_client="AxiDraw remote fzf wizard for selecting and managing plots"
-url="https://github.com/bkuri/axitools"
+pkgdesc="Minimal AxiDraw headless queue: axd (daemon), axq (client), axp (profiles), axr (remote wizard)"
 arch=(any)
+url="https://github.com/bkuri/axitools"
 license=(MIT)
-makedepends=(git)
+backup=('etc/axitools/axq.toml' 'etc/axitools/axr.toml')
+makedepends=(git make)
 source=("git+${url}.git#tag=v${pkgver}"
-        "axitools-server.install"
-        "axitools-client.install")
+        "axitools.install")
 sha256sums=('SKIP'
-            '32878bb0abdfd9b0d85d497bf2920dc9b0bf84998ee148212b4a4491354ef996'
-            '4b23c3e4891b8db783e5e6924a205df455f14bd824ae6029000cad4f67b440f8')
+            'SKIP')
 
-# common install locations
-_bin=/usr/bin
-_user_unit_dir=/usr/lib/systemd/user
-_doc=/usr/share/doc
-
-# NOTE: we intentionally do not install user config files (~/.config/...) from the package.
-#       Provide examples under /usr/share/doc instead.
+# one unified post-install script for both split packages
+install=axitools.install
 
 prepare() {
   cd "${srcdir}/axitools"
-  # nothing to build; scripts are plain python
+  # nothing to build; plain Python scripts + Makefile
 }
 
 build() {
   cd "${srcdir}/axitools"
-  # no-op; keep for future use
+  # no-op (kept for future use)
 }
 
 package_axitools-server() {
-  pkgdesc="${pkgdesc_server}"
   depends=(
     python
     axicli
@@ -43,54 +36,56 @@ package_axitools-server() {
     systemd
   )
   optdepends=(
-    'ntfy-sh: push notifications (if you use webhook endpoints)'
+    'ntfy-sh: push notifications if you wire webhooks'
     'openssh: handy for admin via ssh'
   )
-  install=axitools-server.install
+  install=axitools.install
+  provides=(axitools axd axq axp)
+  conflicts=(axitools)
 
   cd "${srcdir}/axitools"
 
-  # Binaries
-  install -Dm755 bin/axd "${pkgdir}${_bin}/axd"
-  install -Dm755 bin/axq "${pkgdir}${_bin}/axq"
-  install -Dm755 bin/axp "${pkgdir}${_bin}/axp"
+  # Install via Makefile (system prefix + DESTDIR)
+  make DESTDIR="${pkgdir}" PREFIX="/usr" install-server
 
-  # systemd user unit
-  install -Dm644 dist/axd.service "${pkgdir}${_user_unit_dir}/axd.service"
+  # License
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 
-  # Examples & docs
-  install -Dm644 README.md "${pkgdir}${_doc}/axitools-server/README.md"
-  install -Dm644 docs/axr.md "${pkgdir}${_doc}/axitools-server/axr.md"
+  # Systemd services
+  install -Dm644 dist/axd.user.service   "$pkgdir/usr/lib/systemd/user/axd.service"
+  install -Dm644 dist/axd.system.service "$pkgdir/usr/lib/systemd/system/axd.service"
 
-  # Example profiles under doc
-  install -Dm644 dist/profiles/base.py "${pkgdir}${_doc}/axitools-server/examples/profiles/base.py"
-  install -Dm644 dist/profiles/pen/gel.py "${pkgdir}${_doc}/axitools-server/examples/profiles/pen/gel.py"
-  install -Dm644 dist/profiles/color/black.py "${pkgdir}${_doc}/axitools-server/examples/profiles/color/black.py"
+  # Docs (server-flavored). If your Makefile already installs docs, you can drop this.
+  install -Dm644 README.md                  "${pkgdir}/usr/share/doc/axitools-server/README.md"
+  install -Dm644 docs/axr.md                "${pkgdir}/usr/share/doc/axitools-server/axr.md"
 
-  # Example config templates
-  install -Dm644 dist/axq.toml "${pkgdir}${_doc}/axitools-server/examples/axq.toml"
+  # Examples
+  install -Dm644 dist/examples/axq.toml     "${pkgdir}/usr/share/doc/axitools-server/examples/axq.toml"
+  install -Dm644 dist/profiles/base.py      "${pkgdir}/usr/share/doc/axitools-server/examples/profiles/base.py"
+  install -Dm644 dist/profiles/pen/gel.py   "${pkgdir}/usr/share/doc/axitools-server/examples/profiles/pen/gel.py"
+  install -Dm644 dist/profiles/color/black.py "${pkgdir}/usr/share/doc/axitools-server/examples/profiles/color/black.py"
 }
 
 package_axitools-client() {
-  pkgdesc="${pkgdesc_client}"
   depends=(
     python
     fzf
     rsync
     openssh
   )
-  optdepends=(
-    'python: for running axr (already required)'
-  )
-  install=axitools-client.install
+  install=axitools.install
+  provides=(axitools axr)
+  conflicts=(axitools)
 
   cd "${srcdir}/axitools"
 
-  # Client binary
-  install -Dm755 bin/axr "${pkgdir}${_bin}/axr"
+  # Install via Makefile (client target)
+  make DESTDIR="${pkgdir}" PREFIX="/usr" install-client
 
-  # Docs & example config
-  install -Dm644 docs/axr.md "${pkgdir}${_doc}/axitools-client/axr.md"
-  # Ship an example axr.toml in docs rather than writing to the user’s home
-  install -Dm644 dist/examples/axr.toml "${pkgdir}${_doc}/axitools-client/examples/axr.toml"
+  # License
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+
+  # Docs (client-flavored)
+  install -Dm644 docs/axr.md                "${pkgdir}/usr/share/doc/axitools-client/axr.md"
+  install -Dm644 dist/examples/axr.toml     "${pkgdir}/usr/share/doc/axitools-client/examples/axr.toml"
 }

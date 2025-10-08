@@ -12,8 +12,11 @@ import time
 from collections.abc import Sequence
 from typing import Dict, List, Optional, Union
 
+# Add lib directory to path for shared utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
+from config import load_config
+
 HOME = os.path.expanduser("~")
-CONF = os.path.join(HOME, ".config", "axr.toml")
 
 DEFAULT_CFG: dict[str, bool | str | int | list[str]] = {
     "allow_local": False,
@@ -34,13 +37,16 @@ def die(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
-def load_toml(path: str) -> dict[str, bool | str | int | list[str]]:
+def load_toml(path_override: str | None = None) -> dict[str, bool | str | int | list[str]]:
     cfg: dict[str, bool | str | int | list[str]] = dict(DEFAULT_CFG)
-    if os.path.exists(path):
-        import tomllib
-
-        with open(path, "rb") as f:
-            cfg.update(tomllib.load(f))
+    
+    if path_override:
+        config, _ = load_config("axr")
+        cfg.update(config)
+    else:
+        config, _ = load_config("axr")
+        cfg.update(config)
+    
     return cfg
 
 
@@ -393,7 +399,7 @@ def wizard(cfg: Dict[str, Union[bool, str, int, List[str]]]) -> None:
 
 
 def main() -> None:
-    cfg = load_toml(CONF)
+    cfg = load_toml()
 
     _ = argparse.ArgumentParser(
         prog="axr", description="AxiDraw Remote (fzf wizard)"

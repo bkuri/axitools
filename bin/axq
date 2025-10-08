@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 
-
 import json
 import os
 import socket
 import sys
-import tomllib
 
+# Add lib directory to path for shared utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'lib'))
+from config import load_config
 
 HOME = os.path.expanduser("~")
 SOCK = os.path.join(HOME, ".cache", "axq.sock")
-CONF = os.path.join(HOME, ".config", "axq.toml")
 CFG = {"svg_base": ""}
 
 
 def load_toml() -> None:
     try:
-        if os.path.exists(CONF):
-            with open(CONF, "rb") as f:
-                CFG.update(tomllib.load(f))
-
+        CFG.update(load_config("axq"))
     except Exception:
         pass
 
