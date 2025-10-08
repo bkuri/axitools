@@ -1,0 +1,38 @@
+# Build artifacts
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+
+# Makepkg directories
+pkg/
+src/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Archive files
+*.zip
+*.tar.gz
+*.tar.bz2
